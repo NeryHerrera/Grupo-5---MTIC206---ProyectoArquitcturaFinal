@@ -1,0 +1,973 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sistema de Control de Inventario - MTIC206</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        header {
+            background: white;
+            padding: 30px;
+            border-radius: 10px;
+            margin-bottom: 30px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.2);
+        }
+
+        header h1 {
+            color: #667eea;
+            margin-bottom: 10px;
+        }
+
+        header p {
+            color: #666;
+            font-size: 14px;
+        }
+
+        .config-section {
+            background: white;
+            padding: 20px;
+            border-radius: 10px;
+            margin-bottom: 30px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.2);
+        }
+
+        .config-section h3 {
+            color: #667eea;
+            margin-bottom: 15px;
+            font-size: 16px;
+        }
+
+        .config-inputs {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 15px;
+            margin-bottom: 15px;
+        }
+
+        .input-group {
+            display: flex;
+            flex-direction: column;
+        }
+
+        .input-group label {
+            font-size: 12px;
+            color: #666;
+            margin-bottom: 5px;
+            font-weight: 600;
+        }
+
+        .input-group input {
+            padding: 10px;
+            border: 2px solid #e0e0e0;
+            border-radius: 5px;
+            font-size: 14px;
+            font-family: 'Courier New', monospace;
+        }
+
+        .input-group input:focus {
+            outline: none;
+            border-color: #667eea;
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+        }
+
+        .config-status {
+            padding: 10px;
+            border-radius: 5px;
+            font-size: 13px;
+            margin-top: 10px;
+        }
+
+        .config-status.ready {
+            background: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+
+        .config-status.error {
+            background: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+
+        .main-content {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 30px;
+            margin-bottom: 30px;
+        }
+
+        @media (max-width: 768px) {
+            .main-content {
+                grid-template-columns: 1fr;
+            }
+            .config-inputs {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        .card {
+            background: white;
+            padding: 25px;
+            border-radius: 10px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.2);
+        }
+
+        .card h2 {
+            color: #667eea;
+            margin-bottom: 20px;
+            font-size: 18px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .card h2::before {
+            content: '';
+            display: inline-block;
+            width: 4px;
+            height: 24px;
+            background: #667eea;
+            border-radius: 2px;
+        }
+
+        .form-group {
+            margin-bottom: 15px;
+        }
+
+        .form-group label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: 600;
+            color: #333;
+            font-size: 13px;
+        }
+
+        .form-group input,
+        .form-group select {
+            width: 100%;
+            padding: 12px;
+            border: 2px solid #e0e0e0;
+            border-radius: 5px;
+            font-size: 14px;
+            font-family: inherit;
+        }
+
+        .form-group input:focus,
+        .form-group select:focus {
+            outline: none;
+            border-color: #667eea;
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+        }
+
+        .form-group textarea {
+            width: 100%;
+            padding: 12px;
+            border: 2px solid #e0e0e0;
+            border-radius: 5px;
+            font-size: 12px;
+            font-family: 'Courier New', monospace;
+            resize: vertical;
+            min-height: 80px;
+        }
+
+        .file-input-wrapper {
+            position: relative;
+            overflow: hidden;
+            display: inline-block;
+            width: 100%;
+        }
+
+        .file-input-wrapper input[type=file] {
+            position: absolute;
+            left: -9999px;
+        }
+
+        .file-input-label {
+            display: block;
+            padding: 12px;
+            background: #f5f5f5;
+            border: 2px dashed #667eea;
+            border-radius: 5px;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            font-size: 14px;
+            color: #667eea;
+        }
+
+        .file-input-label:hover {
+            background: #f0f0ff;
+            border-color: #764ba2;
+        }
+
+        .file-input-label.has-file {
+            background: #d4edda;
+            border-color: #28a745;
+            color: #155724;
+        }
+
+        button {
+            width: 100%;
+            padding: 12px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            border-radius: 5px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            margin-top: 10px;
+        }
+
+        button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(102, 126, 234, 0.4);
+        }
+
+        button:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .button-secondary {
+            background: #6c757d;
+        }
+
+        .button-secondary:hover {
+            background: #5a6268;
+            box-shadow: 0 5px 15px rgba(90, 98, 104, 0.4);
+        }
+
+        .response-box {
+            margin-top: 15px;
+            padding: 15px;
+            background: #f8f9fa;
+            border-radius: 5px;
+            border-left: 4px solid #667eea;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+            max-height: 200px;
+            overflow-y: auto;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            display: none;
+        }
+
+        .response-box.show {
+            display: block;
+        }
+
+        .response-box.success {
+            background: #d4edda;
+            border-left-color: #28a745;
+        }
+
+        .response-box.error {
+            background: #f8d7da;
+            border-left-color: #dc3545;
+        }
+
+        .response-box.info {
+            background: #d1ecf1;
+            border-left-color: #17a2b8;
+        }
+
+        .inventory-list {
+            margin-top: 20px;
+            max-height: 400px;
+            overflow-y: auto;
+        }
+
+        .inventory-item {
+            background: #f8f9fa;
+            padding: 12px;
+            margin-bottom: 10px;
+            border-radius: 5px;
+            border-left: 4px solid #667eea;
+            font-size: 13px;
+        }
+
+        .inventory-item.clickable {
+            cursor: pointer;
+            transition: background 0.2s ease;
+        }
+
+        .inventory-item.clickable:hover {
+            background: #eef0ff;
+        }
+
+        .inventory-item-header {
+            font-weight: 600;
+            color: #333;
+            margin-bottom: 5px;
+        }
+
+        .inventory-item-detail {
+            color: #666;
+            font-size: 12px;
+            margin: 2px 0;
+        }
+
+        .inventory-item-detail strong {
+            color: #333;
+        }
+
+        .status-badge {
+            display: inline-block;
+            padding: 3px 8px;
+            border-radius: 3px;
+            font-size: 11px;
+            font-weight: 600;
+            margin-left: 5px;
+        }
+
+        .status-badge.low {
+            background: #f8d7da;
+            color: #721c24;
+        }
+
+        .status-badge.normal {
+            background: #d4edda;
+            color: #155724;
+        }
+
+        .loading {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border: 3px solid #f3f3f3;
+            border-top: 3px solid #667eea;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin-right: 10px;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .spinner {
+            display: none;
+            text-align: center;
+            margin: 10px 0;
+        }
+
+        .spinner.show {
+            display: block;
+        }
+
+        .tabs {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+            border-bottom: 2px solid #e0e0e0;
+        }
+
+        .tab-button {
+            padding: 10px 20px;
+            background: none;
+            border: none;
+            border-bottom: 3px solid transparent;
+            color: #666;
+            font-weight: 600;
+            cursor: pointer;
+            font-size: 14px;
+            margin: 0;
+            width: auto;
+            transition: all 0.3s ease;
+        }
+
+        .tab-button.active {
+            color: #667eea;
+            border-bottom-color: #667eea;
+        }
+
+        .tab-button:hover {
+            color: #667eea;
+            transform: none;
+            box-shadow: none;
+        }
+
+        .tab-content {
+            display: none;
+        }
+
+        .tab-content.active {
+            display: block;
+        }
+
+        footer {
+            background: white;
+            padding: 20px;
+            border-radius: 10px;
+            text-align: center;
+            color: #666;
+            font-size: 12px;
+            margin-top: 30px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>📦 Sistema de Control de Inventario con Visión Artificial</h1>
+            <p>Grupo 5 - MTIC206 | Proyecto Final AWS CloudFormation</p>
+        </header>
+
+        <!-- Configuración API -->
+        <div class="config-section">
+            <h3>⚙️ Configuración de API</h3>
+            <div class="config-inputs">
+                <div class="input-group">
+                    <label for="apiUrl">URL de API (base):</label>
+                    <input type="text" id="apiUrl" placeholder="https://xxxx.execute-api.us-east-1.amazonaws.com/prod">
+                </div>
+                <div class="input-group">
+                    <label for="apiKey">API Key:</label>
+                    <input type="password" id="apiKey" placeholder="Pega tu API Key aquí">
+                </div>
+            </div>
+            <button class="button-secondary" onclick="validateConfig()">Verificar Configuración</button>
+            <div id="configStatus" class="config-status"></div>
+        </div>
+
+        <!-- Contenido principal -->
+        <div class="main-content">
+            <!-- CARD 1: INGRESO DE PRODUCTOS -->
+            <div class="card">
+                <h2>📥 Registrar Ingreso</h2>
+                <p style="color: #999; font-size: 12px; margin-bottom: 15px;">Sube una foto del producto. La IA detectará qué es y lo agregará al inventario.</p>
+
+                <div class="form-group">
+                    <label>Selecciona foto del producto:</label>
+                    <div class="file-input-wrapper">
+                        <label for="fotoIngreso" class="file-input-label" id="fotoLabel">
+                            📷 Haz clic o arrastra una imagen aquí
+                        </label>
+                        <input type="file" id="fotoIngreso" accept="image/*">
+                    </div>
+                </div>
+
+                <div class="form-group">
+                    <label for="cantidadIngreso">Cantidad:</label>
+                    <input type="number" id="cantidadIngreso" value="1" min="1">
+                </div>
+
+                <button onclick="registrarIngreso()" id="btnIngreso">Registrar Ingreso</button>
+
+                <div class="spinner" id="spinnerIngreso">
+                    <div class="loading"></div>
+                    Procesando imagen con Rekognition...
+                </div>
+
+                <div class="response-box" id="responseIngreso"></div>
+            </div>
+
+            <!-- CARD 2: SALIDA DE PRODUCTOS -->
+            <div class="card">
+                <h2>📤 Registrar Salida</h2>
+                <p style="color: #999; font-size: 12px; margin-bottom: 15px;">Quita productos del inventario. Si el stock baja demasiado, recibirás una alerta.</p>
+
+                <div class="form-group">
+                    <label for="productoId">ID del Producto (ej: apple, vegetable):</label>
+                    <input type="text" id="productoId" placeholder="Escribe el ID del producto">
+                </div>
+
+                <div class="form-group">
+                    <label for="cantidadSalida">Cantidad a retirar:</label>
+                    <input type="number" id="cantidadSalida" value="1" min="1">
+                </div>
+
+                <button onclick="registrarSalida()" id="btnSalida">Registrar Salida</button>
+
+                <div class="spinner" id="spinnerSalida">
+                    <div class="loading"></div>
+                    Procesando salida...
+                </div>
+
+                <div class="response-box" id="responseSalida"></div>
+            </div>
+        </div>
+
+        <!-- CARD 3: INVENTARIO ACTUAL -->
+        <div class="card">
+            <h2>📊 Inventario y Actividad</h2>
+            <p style="color: #999; font-size: 12px; margin-bottom: 15px;">Consulta en tiempo real los productos almacenados en DynamoDB. Haz clic en un producto para usarlo en una salida.</p>
+
+            <div class="tabs">
+                <button class="tab-button active" onclick="switchTab('inventory-tab', this)">Inventario Actual</button>
+                <button class="tab-button" onclick="switchTab('response-tab', this)">Últimas Respuestas</button>
+                <button class="tab-button" onclick="switchTab('instructions-tab', this)">Instrucciones</button>
+                <button class="tab-button" onclick="switchTab('debug-tab', this)">Debug/Logs</button>
+            </div>
+
+            <div id="inventory-tab" class="tab-content active">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; gap: 10px; flex-wrap: wrap;">
+                    <h3 style="color: #667eea; margin: 0;">Productos en stock:</h3>
+                    <button class="button-secondary" onclick="cargarInventario()" style="width: auto; margin: 0; padding: 8px 16px;">🔄 Actualizar</button>
+                </div>
+                <div class="spinner" id="spinnerInventario">
+                    <div class="loading"></div>
+                    Cargando inventario...
+                </div>
+                <div class="inventory-list" id="inventarioList">
+                    <div style="text-align: center; color: #999; padding: 20px;">
+                        Configura la API y pulsa Actualizar para ver el inventario.
+                    </div>
+                </div>
+            </div>
+
+            <div id="response-tab" class="tab-content">
+                <h3 style="color: #667eea; margin-bottom: 10px;">Historial de Operaciones:</h3>
+                <div class="inventory-list" id="operationHistory">
+                    <div style="text-align: center; color: #999; padding: 20px;">
+                        No hay operaciones aún. Realiza un ingreso o salida para ver el historial.
+                    </div>
+                </div>
+            </div>
+
+            <div id="instructions-tab" class="tab-content">
+                <h3 style="color: #667eea; margin-bottom: 10px;">Cómo usar:</h3>
+                <ol style="color: #666; font-size: 13px; line-height: 1.8; margin-left: 20px;">
+                    <li>
+                        <strong>Configuración:</strong> Pega tu URL de API y API Key en la sección ⚙️ arriba
+                    </li>
+                    <li>
+                        <strong>Ingresos:</strong> Sube una foto de cualquier objeto (frutas, verduras, etc). 
+                        Rekognition la identificará automáticamente.
+                    </li>
+                    <li>
+                        <strong>Salidas:</strong> Usa el ID del producto (ej: "apple", "vegetable") 
+                        para retirar unidades, o haz clic en un producto del inventario. Si bajan del umbral, recibe una alerta por email.
+                    </li>
+                    <li>
+                        <strong>Inventario:</strong> La pestaña "Inventario Actual" consulta GET /inventario y muestra todos los productos en DynamoDB.
+                    </li>
+                    <li>
+                        <strong>Alertas:</strong> Si tienes SNS suscrito a tu email, recibe notificaciones cuando 
+                        el stock de un producto baja demasiado.
+                    </li>
+                </ol>
+            </div>
+
+            <div id="debug-tab" class="tab-content">
+                <h3 style="color: #667eea; margin-bottom: 10px;">Logs de Debug:</h3>
+                <div class="response-box show info" id="debugLogs" style="max-height: 300px;">
+                    [Esperando primeras operaciones...]
+                </div>
+                <button class="button-secondary" onclick="clearLogs()" style="margin-top: 10px;">Limpiar Logs</button>
+            </div>
+        </div>
+
+        <footer>
+            <p>💡 Tip: Verifica que tu API Key sea válida y que los endpoints sean accesibles.</p>
+            <p>📚 Documentación: CloudFormation Stack → cloudformation/README.md</p>
+        </footer>
+    </div>
+
+    <script>
+        // Variables globales
+        let config = {
+            apiUrl: localStorage.getItem('apiUrl') || '',
+            apiKey: localStorage.getItem('apiKey') || ''
+        };
+
+        let operationLog = [];
+        let umbralStock = 5;
+
+        // Cargar configuración guardada
+        window.addEventListener('load', function() {
+            if (config.apiUrl) document.getElementById('apiUrl').value = config.apiUrl;
+            if (config.apiKey) document.getElementById('apiKey').value = config.apiKey;
+            
+            // Restaurar logs
+            const saved = localStorage.getItem('operationLog');
+            if (saved) operationLog = JSON.parse(saved);
+            updateOperationHistory();
+
+            if (config.apiUrl && config.apiKey) {
+                cargarInventario();
+            }
+        });
+
+        // Validar configuración
+        function validateConfig() {
+            const apiUrl = document.getElementById('apiUrl').value.trim();
+            const apiKey = document.getElementById('apiKey').value.trim();
+            const status = document.getElementById('configStatus');
+
+            if (!apiUrl || !apiKey) {
+                status.classList.remove('ready');
+                status.classList.add('error');
+                status.textContent = '❌ Falta completar URL de API o API Key';
+                return false;
+            }
+
+            config.apiUrl = apiUrl;
+            config.apiKey = apiKey;
+
+            localStorage.setItem('apiUrl', apiUrl);
+            localStorage.setItem('apiKey', apiKey);
+
+            status.classList.remove('error');
+            status.classList.add('ready');
+            status.textContent = '✅ Configuración lista. Puedes registrar ingresos y salidas.';
+            
+            addLog('INFO', 'Configuración validada correctamente');
+            cargarInventario();
+            return true;
+        }
+
+        // Manejar foto
+        document.getElementById('fotoIngreso').addEventListener('change', function(e) {
+            const label = document.getElementById('fotoLabel');
+            if (e.target.files.length > 0) {
+                label.classList.add('has-file');
+                label.textContent = '✅ ' + e.target.files[0].name;
+            } else {
+                label.classList.remove('has-file');
+                label.textContent = '📷 Haz clic o arrastra una imagen aquí';
+            }
+        });
+
+        // Drag and drop
+        const fotoLabel = document.getElementById('fotoLabel');
+        ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(eventName => {
+            fotoLabel.addEventListener(eventName, preventDefaults, false);
+        });
+
+        function preventDefaults(e) {
+            e.preventDefault();
+            e.stopPropagation();
+        }
+
+        fotoLabel.addEventListener('drop', function(e) {
+            const dt = e.dataTransfer;
+            const files = dt.files;
+            document.getElementById('fotoIngreso').files = files;
+            const event = new Event('change', { bubbles: true });
+            document.getElementById('fotoIngreso').dispatchEvent(event);
+        });
+
+        // Registrar ingreso
+        async function registrarIngreso() {
+            if (!validateConfig()) {
+                showResponse('responseIngreso', '❌ Configura API URL y API Key primero', 'error');
+                return;
+            }
+
+            const file = document.getElementById('fotoIngreso').files[0];
+            if (!file) {
+                showResponse('responseIngreso', '❌ Selecciona una foto primero', 'error');
+                return;
+            }
+
+            const cantidad = document.getElementById('cantidadIngreso').value;
+            
+            // Convertir imagen a base64
+            const reader = new FileReader();
+            reader.onload = async function(e) {
+                const base64 = e.target.result.split(',')[1];
+                
+                showSpinner('spinnerIngreso', true);
+                
+                try {
+                    const response = await fetch(`${config.apiUrl}/ingreso`, {
+                        method: 'POST',
+                        headers: {
+                            'X-Api-Key': config.apiKey,
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify({
+                            imagenBase64: base64,
+                            cantidad: parseInt(cantidad)
+                        })
+                    });
+
+                    const data = await response.json();
+
+                    if (response.ok) {
+                        const mensaje = `✅ Ingreso registrado:
+Producto: ${data.producto}
+Categoría: ${data.categoria}
+Cantidad total: ${data.cantidadTotal}
+Confianza IA: ${data.confianza}%`;
+                        
+                        showResponse('responseIngreso', mensaje, 'success');
+                        addLog('SUCCESS', `Ingreso: ${data.producto} x${cantidad}`);
+
+                        if (data.productoId) {
+                            document.getElementById('productoId').value = data.productoId;
+                        } else if (data.producto) {
+                            document.getElementById('productoId').value = data.producto.toLowerCase();
+                        }
+                        
+                        // Guardar en historial
+                        operationLog.unshift({
+                            tipo: 'INGRESO',
+                            producto: data.producto,
+                            productoId: data.productoId,
+                            cantidad: cantidad,
+                            timestamp: new Date().toLocaleString()
+                        });
+                        updateOperationHistory();
+                        cargarInventario();
+                        
+                        // Limpiar form
+                        document.getElementById('fotoIngreso').value = '';
+                        document.getElementById('fotoLabel').classList.remove('has-file');
+                        document.getElementById('fotoLabel').textContent = '📷 Haz clic o arrastra una imagen aquí';
+                    } else {
+                        showResponse('responseIngreso', `❌ Error: ${data.error || response.statusText}`, 'error');
+                        addLog('ERROR', `Ingreso falló: ${data.error}`);
+                    }
+                } catch (error) {
+                    showResponse('responseIngreso', `❌ Error de conexión: ${error.message}`, 'error');
+                    addLog('ERROR', `Error de red: ${error.message}`);
+                }
+                
+                showSpinner('spinnerIngreso', false);
+            };
+            reader.readAsDataURL(file);
+        }
+
+        // Registrar salida
+        async function registrarSalida() {
+            if (!validateConfig()) {
+                showResponse('responseSalida', '❌ Configura API URL y API Key primero', 'error');
+                return;
+            }
+
+            const productoId = document.getElementById('productoId').value.trim();
+            const cantidad = document.getElementById('cantidadSalida').value;
+
+            if (!productoId) {
+                showResponse('responseSalida', '❌ Ingresa el ID del producto (ej: apple, vegetable)', 'error');
+                return;
+            }
+
+            showSpinner('spinnerSalida', true);
+
+            try {
+                const response = await fetch(`${config.apiUrl}/salida`, {
+                    method: 'POST',
+                    headers: {
+                        'X-Api-Key': config.apiKey,
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        productoId: productoId,
+                        cantidad: parseInt(cantidad)
+                    })
+                });
+
+                const data = await response.json();
+
+                if (response.ok) {
+                    const alerta = data.alertaDisparada ? '🔔 ALERTA DISPARADA' : '✅ Sin alerta';
+                    const mensaje = `Salida registrada:
+Producto: ${data.producto}
+Cantidad restante: ${data.cantidadRestante}
+${alerta}`;
+                    
+                    showResponse('responseSalida', mensaje, data.alertaDisparada ? 'error' : 'success');
+                    addLog('SUCCESS', `Salida: ${productoId} x${cantidad} → Restante: ${data.cantidadRestante}`);
+                    
+                    // Guardar en historial
+                    operationLog.unshift({
+                        tipo: 'SALIDA',
+                        producto: productoId,
+                        cantidad: cantidad,
+                        cantidadRestante: data.cantidadRestante,
+                        alerta: data.alertaDisparada,
+                        timestamp: new Date().toLocaleString()
+                    });
+                    updateOperationHistory();
+                    cargarInventario();
+                } else {
+                    showResponse('responseSalida', `❌ Error: ${data.error || response.statusText}`, 'error');
+                    addLog('ERROR', `Salida falló: ${data.error}`);
+                }
+            } catch (error) {
+                showResponse('responseSalida', `❌ Error de conexión: ${error.message}`, 'error');
+                addLog('ERROR', `Error de red: ${error.message}`);
+            }
+
+            showSpinner('spinnerSalida', false);
+        }
+
+        // Consultar inventario desde DynamoDB (GET /inventario)
+        async function cargarInventario() {
+            if (!config.apiUrl || !config.apiKey) {
+                return;
+            }
+
+            const container = document.getElementById('inventarioList');
+            showSpinner('spinnerInventario', true);
+
+            try {
+                const response = await fetch(`${config.apiUrl}/inventario`, {
+                    method: 'GET',
+                    headers: {
+                        'X-Api-Key': config.apiKey
+                    }
+                });
+
+                const data = await response.json();
+
+                if (!response.ok) {
+                    container.innerHTML = `<div style="text-align: center; color: #721c24; padding: 20px;">❌ ${data.error || 'Error al cargar inventario'}</div>`;
+                    addLog('ERROR', `Inventario falló: ${data.error || response.statusText}`);
+                    return;
+                }
+
+                umbralStock = data.umbral ?? umbralStock;
+                renderInventario(data.productos || [], data.total || 0);
+                addLog('INFO', `Inventario cargado: ${data.total} producto(s)`);
+            } catch (error) {
+                container.innerHTML = `<div style="text-align: center; color: #721c24; padding: 20px;">❌ Error de conexión: ${error.message}</div>`;
+                addLog('ERROR', `Error al cargar inventario: ${error.message}`);
+            } finally {
+                showSpinner('spinnerInventario', false);
+            }
+        }
+
+        function renderInventario(productos, total) {
+            const container = document.getElementById('inventarioList');
+
+            if (total === 0) {
+                container.innerHTML = '<div style="text-align: center; color: #999; padding: 20px;">No hay productos en el inventario. Registra un ingreso con una foto.</div>';
+                return;
+            }
+
+            container.innerHTML = productos.map((item) => {
+                const stockClass = item.stockBajo ? 'low' : 'normal';
+                const stockLabel = item.stockBajo ? '⚠️ Stock bajo' : '✅ OK';
+                const fecha = item.ultimaActualizacion
+                    ? new Date(item.ultimaActualizacion).toLocaleString()
+                    : 'N/D';
+
+                return `<div class="inventory-item clickable" onclick="seleccionarProducto('${item.productoId}')" title="Clic para usar en salida">
+                    <div class="inventory-item-header">
+                        ${item.nombre}
+                        <span class="status-badge ${stockClass}">${stockLabel}</span>
+                    </div>
+                    <div class="inventory-item-detail"><strong>ID:</strong> ${item.productoId}</div>
+                    <div class="inventory-item-detail"><strong>Categoría:</strong> ${item.categoria}</div>
+                    <div class="inventory-item-detail"><strong>Cantidad:</strong> ${item.cantidad} unidades (umbral: ${umbralStock})</div>
+                    <div class="inventory-item-detail" style="font-size: 11px; color: #999;"><strong>Actualizado:</strong> ${fecha}</div>
+                </div>`;
+            }).join('');
+        }
+
+        function seleccionarProducto(productoId) {
+            document.getElementById('productoId').value = productoId;
+            addLog('INFO', `Producto seleccionado para salida: ${productoId}`);
+            window.scrollTo({ top: 0, behavior: 'smooth' });
+        }
+
+        // Utilidades
+        function showResponse(elementId, message, type) {
+            const element = document.getElementById(elementId);
+            element.textContent = message;
+            element.classList.add('show');
+            element.className = `response-box show ${type}`;
+        }
+
+        function showSpinner(elementId, show) {
+            const element = document.getElementById(elementId);
+            if (show) {
+                element.classList.add('show');
+            } else {
+                element.classList.remove('show');
+            }
+        }
+
+        function switchTab(tabName, buttonEl) {
+            document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
+            document.querySelectorAll('.tab-button').forEach(el => el.classList.remove('active'));
+            
+            document.getElementById(tabName).classList.add('active');
+            if (buttonEl) {
+                buttonEl.classList.add('active');
+            }
+        }
+
+        function addLog(level, message) {
+            const timestamp = new Date().toLocaleTimeString();
+            const logEntry = `[${timestamp}] ${level}: ${message}`;
+            const debugLogs = document.getElementById('debugLogs');
+            
+            const current = debugLogs.textContent;
+            if (current === '[Esperando primeras operaciones...]') {
+                debugLogs.textContent = logEntry + '\n';
+            } else {
+                debugLogs.textContent = logEntry + '\n' + current;
+            }
+        }
+
+        function clearLogs() {
+            document.getElementById('debugLogs').textContent = '[Logs limpiados]';
+        }
+
+        function updateOperationHistory() {
+            const container = document.getElementById('operationHistory');
+            
+            if (operationLog.length === 0) {
+                container.innerHTML = '<div style="text-align: center; color: #999; padding: 20px;">No hay operaciones aún. Realiza un ingreso o salida para ver el historial.</div>';
+                return;
+            }
+
+            container.innerHTML = operationLog.map((op, idx) => {
+                let html = `<div class="inventory-item">
+                    <div class="inventory-item-header">
+                        ${op.tipo === 'INGRESO' ? '📥' : '📤'} ${op.tipo}
+                        <span class="status-badge ${op.alerta ? 'low' : 'normal'}">
+                            ${op.alerta ? '⚠️ Alerta' : op.tipo === 'INGRESO' ? '✅ OK' : '✅ OK'}
+                        </span>
+                    </div>
+                    <div class="inventory-item-detail"><strong>Producto:</strong> ${op.producto}</div>
+                    <div class="inventory-item-detail"><strong>Cantidad:</strong> ${op.cantidad}</div>`;
+                
+                if (op.cantidadRestante !== undefined) {
+                    html += `<div class="inventory-item-detail"><strong>Restante:</strong> ${op.cantidadRestante}</div>`;
+                }
+                if (op.cantidadTotal !== undefined) {
+                    html += `<div class="inventory-item-detail"><strong>Total:</strong> ${op.cantidadTotal}</div>`;
+                }
+                
+                html += `<div class="inventory-item-detail" style="font-size: 11px; color: #999;"><strong>Hora:</strong> ${op.timestamp}</div>
+                    </div>`;
+                
+                return html;
+            }).join('');
+
+            localStorage.setItem('operationLog', JSON.stringify(operationLog));
+        }
+
+        // Log inicial
+        addLog('INFO', 'Aplicación cargada. Configura tu API para comenzar.');
+    </script>
+</body>
+</html>

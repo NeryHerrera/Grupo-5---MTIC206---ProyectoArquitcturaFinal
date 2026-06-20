@@ -148,6 +148,7 @@ Resources:
                   - dynamodb:GetItem
                   - dynamodb:UpdateItem
                   - dynamodb:Query
+                  - dynamodb:Scan
                 Resource:
                   - !GetAtt TablaInventarioPyME.Arn
                   - !Sub "${TablaInventarioPyME.Arn}/index/*"
@@ -173,6 +174,12 @@ Resources:
     Type: AWS::Logs::LogGroup
     Properties:
       LogGroupName: "/aws/lambda/GestionarSalidasAlertasFunction"
+      RetentionInDays: 14
+
+  ListarInventarioLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: "/aws/lambda/ListarInventarioFunction"
       RetentionInDays: 14
 
   # ---------------------------------------------------------------------------
@@ -274,6 +281,7 @@ Resources:
 
               return respuesta(200, {
                 mensaje: "Ingreso registrado correctamente",
+                productoId,
                 producto: etiquetaPrincipal,
                 categoria,
                 cantidadTotal: cantidadActual + unidades,
@@ -401,6 +409,69 @@ Resources:
           Value: !Ref ProjectName
 
   # ---------------------------------------------------------------------------
+  # LOGICA DE NEGOCIO: Lambda #3 - ListarInventarioFunction
+  # Consulta todos los productos almacenados en DynamoDB
+  # ---------------------------------------------------------------------------
+  ListarInventarioFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: ListarInventarioLogGroup
+    Properties:
+      FunctionName: ListarInventarioFunction
+      Runtime: nodejs24.x
+      Handler: index.handler
+      Role: !GetAtt LambdaInventoryExecutionRole.Arn
+      Timeout: 10
+      MemorySize: 128
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref TablaInventarioPyME
+          UMBRAL_STOCK_BAJO: !Ref StockBajoUmbral
+      Code:
+        ZipFile: |
+          const { DynamoDBClient } = require("@aws-sdk/client-dynamodb");
+          const { DynamoDBDocumentClient, ScanCommand } = require("@aws-sdk/lib-dynamodb");
+
+          const ddbClient = new DynamoDBClient({});
+          const ddb = DynamoDBDocumentClient.from(ddbClient);
+
+          exports.handler = async () => {
+            try {
+              const result = await ddb.send(
+                new ScanCommand({ TableName: process.env.TABLE_NAME })
+              );
+
+              const umbral = Number(process.env.UMBRAL_STOCK_BAJO || 5);
+              const productos = (result.Items || [])
+                .map((item) => ({
+                  productoId: item.productoId,
+                  nombre: item.nombre,
+                  categoria: item.categoria,
+                  cantidad: item.cantidad ?? 0,
+                  stockBajo: (item.cantidad ?? 0) < umbral,
+                  ultimaActualizacion: item.ultimaActualizacion,
+                  confianzaIA: item.confianzaIA,
+                }))
+                .sort((a, b) => a.nombre.localeCompare(b.nombre));
+
+              return respuesta(200, { productos, total: productos.length, umbral });
+            } catch (err) {
+              console.error("Error en ListarInventarioFunction:", err);
+              return respuesta(500, { error: "Error interno al consultar el inventario" });
+            }
+          };
+
+          function respuesta(statusCode, body) {
+            return {
+              statusCode,
+              headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
+              body: JSON.stringify(body),
+            };
+          }
+      Tags:
+        - Key: Proyecto
+          Value: !Ref ProjectName
+
+  # ---------------------------------------------------------------------------
   # INTEGRACION: API Gateway (InventarioControlAPI) - REST API
   # ---------------------------------------------------------------------------
   InventarioControlAPI:
@@ -427,6 +498,14 @@ Resources:
       RestApiId: !Ref InventarioControlAPI
       ParentId: !GetAtt InventarioControlAPI.RootResourceId
       PathPart: salida
+
+  # Recurso /inventario
+  InventarioResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref InventarioControlAPI
+      ParentId: !GetAtt InventarioControlAPI.RootResourceId
+      PathPart: inventario
 
   # Metodo POST /ingreso -> ProcesarIngresoIAFunction
   IngresoPostMethod:
@@ -510,6 +589,47 @@ Resources:
             method.response.header.Access-Control-Allow-Methods: true
             method.response.header.Access-Control-Allow-Origin: true
 
+  # Metodo GET /inventario -> ListarInventarioFunction
+  InventarioGetMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref InventarioControlAPI
+      ResourceId: !Ref InventarioResource
+      HttpMethod: GET
+      AuthorizationType: NONE
+      ApiKeyRequired: true
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub
+          - "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${FunctionArn}/invocations"
+          - FunctionArn: !GetAtt ListarInventarioFunction.Arn
+
+  # CORS para /inventario
+  InventarioOptionsMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref InventarioControlAPI
+      ResourceId: !Ref InventarioResource
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      Integration:
+        Type: MOCK
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+        IntegrationResponses:
+          - StatusCode: "200"
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Api-Key'"
+              method.response.header.Access-Control-Allow-Methods: "'OPTIONS,GET'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+      MethodResponses:
+        - StatusCode: "200"
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+
   # Permiso para que API Gateway invoque ProcesarIngresoIAFunction
   IngresoLambdaPermission:
     Type: AWS::Lambda::Permission
@@ -528,6 +648,15 @@ Resources:
       Principal: apigateway.amazonaws.com
       SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${InventarioControlAPI}/*/POST/salida"
 
+  # Permiso para que API Gateway invoque ListarInventarioFunction
+  InventarioLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref ListarInventarioFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${InventarioControlAPI}/*/GET/inventario"
+
   # Deployment + Stage
   ApiDeployment:
     Type: AWS::ApiGateway::Deployment
@@ -536,8 +665,11 @@ Resources:
       - IngresoOptionsMethod
       - SalidaPostMethod
       - SalidaOptionsMethod
+      - InventarioGetMethod
+      - InventarioOptionsMethod
     Properties:
       RestApiId: !Ref InventarioControlAPI
+      Description: !Sub "Deploy ${AWS::StackName} v2-get-inventario"
 
   ApiStage:
     Type: AWS::ApiGateway::Stage
@@ -548,7 +680,6 @@ Resources:
       MethodSettings:
         - ResourcePath: "/*"
           HttpMethod: "*"
-          LoggingLevel: INFO
           MetricsEnabled: true
           ThrottlingBurstLimit: 50
           ThrottlingRateLimit: 20
@@ -613,6 +744,10 @@ Outputs:
     Description: Endpoint para registrar salidas (POST).
     Value: !Sub "https://${InventarioControlAPI}.execute-api.${AWS::Region}.amazonaws.com/prod/salida"
 
+  InventarioEndpoint:
+    Description: Endpoint para consultar el inventario completo (GET).
+    Value: !Sub "https://${InventarioControlAPI}.execute-api.${AWS::Region}.amazonaws.com/prod/inventario"
+
   DynamoDBTableName:
     Description: Nombre de la tabla DynamoDB de inventario.
     Value: !Ref TablaInventarioPyME
@@ -626,5 +761,5 @@ Outputs:
     Value: !Ref InventarioApiKey
 
   LambdaExecutionRoleArn:
-    Description: ARN del rol IAM usado por ambas funciones Lambda.
+    Description: ARN del rol IAM usado por las funciones Lambda del inventario.
     Value: !GetAtt LambdaInventoryExecutionRole.Arn
