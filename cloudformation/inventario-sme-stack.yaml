@@ -1,0 +1,630 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Grupo 5 - MTIC206 - Sistema Automatizado de Control de Inventario con Vision Artificial.
+  Arquitectura Serverless (S3, API Gateway, Lambda, Rekognition, DynamoDB, SNS, IAM, CloudWatch)
+  disenada para operar dentro de los limites del AWS Free Tier.
+
+# -----------------------------------------------------------------------------
+# PARAMETROS
+# -----------------------------------------------------------------------------
+Parameters:
+  ProjectName:
+    Type: String
+    Default: inventario-sme
+    Description: Prefijo usado para nombrar los recursos del proyecto.
+
+  AlertEmail:
+    Type: String
+    Description: Correo electronico del gerente/administrador que recibira las alertas de stock bajo (SNS).
+
+  StockBajoUmbral:
+    Type: Number
+    Default: 5
+    Description: Umbral de unidades por debajo del cual se dispara la alerta de stock bajo (uso de referencia para la logica de Lambda).
+
+# -----------------------------------------------------------------------------
+# RECURSOS
+# -----------------------------------------------------------------------------
+Resources:
+
+  # ---------------------------------------------------------------------------
+  # CAPA DE PRESENTACION: S3 (alojamiento web estatico del frontend)
+  # ---------------------------------------------------------------------------
+  FrontendBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "inventario-sme-frontend-bucket-${AWS::AccountId}"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: false
+        BlockPublicPolicy: false
+        IgnorePublicAcls: false
+        RestrictPublicBuckets: false
+      WebsiteConfiguration:
+        IndexDocument: index.html
+        ErrorDocument: error.html
+      CorsConfiguration:
+        CorsRules:
+          - AllowedOrigins: ["*"]
+            AllowedMethods: [GET]
+            AllowedHeaders: ["*"]
+            MaxAge: 3000
+      Tags:
+        - Key: Proyecto
+          Value: !Ref ProjectName
+
+  FrontendBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref FrontendBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: PublicReadGetObject
+            Effect: Allow
+            Principal: "*"
+            Action: s3:GetObject
+            Resource: !Sub "${FrontendBucket.Arn}/*"
+
+  # ---------------------------------------------------------------------------
+  # CAPA DE DATOS: DynamoDB (TablaInventarioPyME)
+  # ---------------------------------------------------------------------------
+  TablaInventarioPyME:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: TablaInventarioPyME
+      BillingMode: PAY_PER_REQUEST   # Modelo On-Demand, segun lo indicado en el README
+      AttributeDefinitions:
+        - AttributeName: productoId
+          AttributeType: S
+        - AttributeName: categoria
+          AttributeType: S
+      KeySchema:
+        - AttributeName: productoId
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: CategoriaIndex
+          KeySchema:
+            - AttributeName: categoria
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+      SSESpecification:
+        SSEEnabled: true
+      Tags:
+        - Key: Proyecto
+          Value: !Ref ProjectName
+
+  # ---------------------------------------------------------------------------
+  # NOTIFICACIONES: SNS (Alertas_StockBajo_Topic)
+  # ---------------------------------------------------------------------------
+  AlertasStockBajoTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: Alertas_StockBajo_Topic
+      DisplayName: Alertas de Stock Bajo - Inventario PyME
+
+  AlertasStockBajoSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref AlertasStockBajoTopic
+      Protocol: email
+      Endpoint: !Ref AlertEmail
+
+  # ---------------------------------------------------------------------------
+  # SEGURIDAD: IAM Role para Lambda (LambdaInventoryExecutionRole)
+  # ---------------------------------------------------------------------------
+  LambdaInventoryExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: LambdaInventoryExecutionRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: InventoryLambdaPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # Logs en CloudWatch
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: "arn:aws:logs:*:*:*"
+              # Rekognition (solo DetectLabels, minimo privilegio)
+              - Effect: Allow
+                Action:
+                  - rekognition:DetectLabels
+                Resource: "*"
+              # DynamoDB - acceso a la tabla y su GSI
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:GetItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:Query
+                Resource:
+                  - !GetAtt TablaInventarioPyME.Arn
+                  - !Sub "${TablaInventarioPyME.Arn}/index/*"
+              # SNS - publicar alertas
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: !Ref AlertasStockBajoTopic
+      Tags:
+        - Key: Proyecto
+          Value: !Ref ProjectName
+
+  # ---------------------------------------------------------------------------
+  # LOG GROUPS (retencion definida explicitamente para mantenerse en Free Tier)
+  # ---------------------------------------------------------------------------
+  ProcesarIngresoLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: "/aws/lambda/ProcesarIngresoIAFunction"
+      RetentionInDays: 14
+
+  GestionarSalidasLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: "/aws/lambda/GestionarSalidasAlertasFunction"
+      RetentionInDays: 14
+
+  # ---------------------------------------------------------------------------
+  # LOGICA DE NEGOCIO: Lambda #1 - ProcesarIngresoIAFunction
+  # Invoca Rekognition (DetectLabels), clasifica y guarda/suma en DynamoDB
+  # ---------------------------------------------------------------------------
+  ProcesarIngresoIAFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: ProcesarIngresoLogGroup
+    Properties:
+      FunctionName: ProcesarIngresoIAFunction
+      Runtime: nodejs24.x
+      Handler: index.handler
+      Role: !GetAtt LambdaInventoryExecutionRole.Arn
+      Timeout: 15
+      MemorySize: 256
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref TablaInventarioPyME
+          MIN_CONFIDENCE: "75"
+      Code:
+        ZipFile: |
+          const { RekognitionClient, DetectLabelsCommand } = require("@aws-sdk/client-rekognition");
+          const { DynamoDBClient } = require("@aws-sdk/client-dynamodb");
+          const { DynamoDBDocumentClient, GetCommand, UpdateCommand } = require("@aws-sdk/lib-dynamodb");
+
+          const rekognition = new RekognitionClient({});
+          const ddbClient = new DynamoDBClient({});
+          const ddb = DynamoDBDocumentClient.from(ddbClient);
+
+          // Mapeo simple de etiquetas de Rekognition a categorias de almacenamiento
+          const MAPA_CATEGORIAS = {
+            Vegetable: "Refrigerador",
+            Fruit: "Refrigerador",
+            Meat: "Congelador",
+            Seafood: "Congelador",
+            Dairy: "Refrigerador",
+            Beverage: "Bodega Seca",
+            Bread: "Bodega Seca",
+          };
+
+          exports.handler = async (event) => {
+            try {
+              const body = JSON.parse(event.body || "{}");
+              const { imagenBase64, cantidad } = body;
+
+              if (!imagenBase64) {
+                return respuesta(400, { error: "Falta el campo imagenBase64" });
+              }
+
+              const buffer = Buffer.from(imagenBase64, "base64");
+
+              // 1. Analisis cognitivo con Rekognition
+              const labelsResult = await rekognition.send(
+                new DetectLabelsCommand({
+                  Image: { Bytes: buffer },
+                  MaxLabels: 5,
+                  MinConfidence: Number(process.env.MIN_CONFIDENCE || 75),
+                })
+              );
+
+              const labels = labelsResult.Labels || [];
+              if (labels.length === 0) {
+                return respuesta(422, { error: "No se pudo identificar el producto en la imagen" });
+              }
+
+              const etiquetaPrincipal = labels[0].Name;
+              const confianza = labels[0].Confidence;
+              const categoria = MAPA_CATEGORIAS[etiquetaPrincipal] || "Sin Clasificar";
+              const productoId = etiquetaPrincipal.toLowerCase();
+              const unidades = cantidad ? Number(cantidad) : 1;
+
+              // 2. Verificar si el producto ya existe
+              const existente = await ddb.send(
+                new GetCommand({
+                  TableName: process.env.TABLE_NAME,
+                  Key: { productoId },
+                })
+              );
+
+              const cantidadActual = existente.Item ? existente.Item.cantidad : 0;
+
+              // 3. Registrar / actualizar inventario
+              await ddb.send(
+                new UpdateCommand({
+                  TableName: process.env.TABLE_NAME,
+                  Key: { productoId },
+                  UpdateExpression:
+                    "SET nombre = :nombre, categoria = :categoria, cantidad = :nuevaCantidad, ultimaActualizacion = :fecha, confianzaIA = :confianza",
+                  ExpressionAttributeValues: {
+                    ":nombre": etiquetaPrincipal,
+                    ":categoria": categoria,
+                    ":nuevaCantidad": cantidadActual + unidades,
+                    ":fecha": new Date().toISOString(),
+                    ":confianza": confianza,
+                  },
+                })
+              );
+
+              return respuesta(200, {
+                mensaje: "Ingreso registrado correctamente",
+                producto: etiquetaPrincipal,
+                categoria,
+                cantidadTotal: cantidadActual + unidades,
+                confianza,
+              });
+            } catch (err) {
+              console.error("Error en ProcesarIngresoIAFunction:", err);
+              return respuesta(500, { error: "Error interno al procesar el ingreso" });
+            }
+          };
+
+          function respuesta(statusCode, body) {
+            return {
+              statusCode,
+              headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
+              body: JSON.stringify(body),
+            };
+          }
+      Tags:
+        - Key: Proyecto
+          Value: !Ref ProjectName
+
+  # ---------------------------------------------------------------------------
+  # LOGICA DE NEGOCIO: Lambda #2 - GestionarSalidasAlertasFunction
+  # Resta inventario y publica alerta en SNS si el nivel es critico
+  # ---------------------------------------------------------------------------
+  GestionarSalidasAlertasFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: GestionarSalidasLogGroup
+    Properties:
+      FunctionName: GestionarSalidasAlertasFunction
+      Runtime: nodejs24.x
+      Handler: index.handler
+      Role: !GetAtt LambdaInventoryExecutionRole.Arn
+      Timeout: 10
+      MemorySize: 128
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref TablaInventarioPyME
+          TOPIC_ARN: !Ref AlertasStockBajoTopic
+          UMBRAL_STOCK_BAJO: !Ref StockBajoUmbral
+      Code:
+        ZipFile: |
+          const { DynamoDBClient } = require("@aws-sdk/client-dynamodb");
+          const { DynamoDBDocumentClient, GetCommand, UpdateCommand } = require("@aws-sdk/lib-dynamodb");
+          const { SNSClient, PublishCommand } = require("@aws-sdk/client-sns");
+
+          const ddbClient = new DynamoDBClient({});
+          const ddb = DynamoDBDocumentClient.from(ddbClient);
+          const sns = new SNSClient({});
+
+          exports.handler = async (event) => {
+            try {
+              const body = JSON.parse(event.body || "{}");
+              const { productoId, cantidad } = body;
+
+              if (!productoId || !cantidad) {
+                return respuesta(400, { error: "Se requieren los campos productoId y cantidad" });
+              }
+
+              const unidadesRetiradas = Number(cantidad);
+
+              // 1. Obtener cantidad actual
+              const existente = await ddb.send(
+                new GetCommand({
+                  TableName: process.env.TABLE_NAME,
+                  Key: { productoId },
+                })
+              );
+
+              if (!existente.Item) {
+                return respuesta(404, { error: "Producto no encontrado en el inventario" });
+              }
+
+              const cantidadActual = existente.Item.cantidad || 0;
+              const nuevaCantidad = Math.max(cantidadActual - unidadesRetiradas, 0);
+
+              // 2. Actualizar inventario
+              await ddb.send(
+                new UpdateCommand({
+                  TableName: process.env.TABLE_NAME,
+                  Key: { productoId },
+                  UpdateExpression: "SET cantidad = :nuevaCantidad, ultimaActualizacion = :fecha",
+                  ExpressionAttributeValues: {
+                    ":nuevaCantidad": nuevaCantidad,
+                    ":fecha": new Date().toISOString(),
+                  },
+                })
+              );
+
+              const umbral = Number(process.env.UMBRAL_STOCK_BAJO || 5);
+
+              // 3. Disparar alerta si el nivel es critico
+              if (nuevaCantidad < umbral) {
+                await sns.send(
+                  new PublishCommand({
+                    TopicArn: process.env.TOPIC_ARN,
+                    Subject: `Alerta de Stock Bajo: ${productoId}`,
+                    Message: `El producto "${productoId}" tiene ${nuevaCantidad} unidades, por debajo del umbral de ${umbral}. Favor reabastecer.`,
+                  })
+                );
+              }
+
+              return respuesta(200, {
+                mensaje: "Salida registrada correctamente",
+                producto: productoId,
+                cantidadRestante: nuevaCantidad,
+                alertaDisparada: nuevaCantidad < umbral,
+              });
+            } catch (err) {
+              console.error("Error en GestionarSalidasAlertasFunction:", err);
+              return respuesta(500, { error: "Error interno al procesar la salida" });
+            }
+          };
+
+          function respuesta(statusCode, body) {
+            return {
+              statusCode,
+              headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
+              body: JSON.stringify(body),
+            };
+          }
+      Tags:
+        - Key: Proyecto
+          Value: !Ref ProjectName
+
+  # ---------------------------------------------------------------------------
+  # INTEGRACION: API Gateway (InventarioControlAPI) - REST API
+  # ---------------------------------------------------------------------------
+  InventarioControlAPI:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: InventarioControlAPI
+      Description: API REST para el sistema de control de inventario con vision artificial.
+      EndpointConfiguration:
+        Types:
+          - REGIONAL
+
+  # Recurso /ingreso
+  IngresoResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref InventarioControlAPI
+      ParentId: !GetAtt InventarioControlAPI.RootResourceId
+      PathPart: ingreso
+
+  # Recurso /salida
+  SalidaResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref InventarioControlAPI
+      ParentId: !GetAtt InventarioControlAPI.RootResourceId
+      PathPart: salida
+
+  # Metodo POST /ingreso -> ProcesarIngresoIAFunction
+  IngresoPostMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref InventarioControlAPI
+      ResourceId: !Ref IngresoResource
+      HttpMethod: POST
+      AuthorizationType: NONE
+      ApiKeyRequired: true
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub
+          - "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${FunctionArn}/invocations"
+          - FunctionArn: !GetAtt ProcesarIngresoIAFunction.Arn
+
+  # CORS para /ingreso
+  IngresoOptionsMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref InventarioControlAPI
+      ResourceId: !Ref IngresoResource
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      Integration:
+        Type: MOCK
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+        IntegrationResponses:
+          - StatusCode: "200"
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Api-Key'"
+              method.response.header.Access-Control-Allow-Methods: "'OPTIONS,POST'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+      MethodResponses:
+        - StatusCode: "200"
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+
+  # Metodo POST /salida -> GestionarSalidasAlertasFunction
+  SalidaPostMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref InventarioControlAPI
+      ResourceId: !Ref SalidaResource
+      HttpMethod: POST
+      AuthorizationType: NONE
+      ApiKeyRequired: true
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub
+          - "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${FunctionArn}/invocations"
+          - FunctionArn: !GetAtt GestionarSalidasAlertasFunction.Arn
+
+  # CORS para /salida
+  SalidaOptionsMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref InventarioControlAPI
+      ResourceId: !Ref SalidaResource
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      Integration:
+        Type: MOCK
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+        IntegrationResponses:
+          - StatusCode: "200"
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Api-Key'"
+              method.response.header.Access-Control-Allow-Methods: "'OPTIONS,POST'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+      MethodResponses:
+        - StatusCode: "200"
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+
+  # Permiso para que API Gateway invoque ProcesarIngresoIAFunction
+  IngresoLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref ProcesarIngresoIAFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${InventarioControlAPI}/*/POST/ingreso"
+
+  # Permiso para que API Gateway invoque GestionarSalidasAlertasFunction
+  SalidaLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref GestionarSalidasAlertasFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${InventarioControlAPI}/*/POST/salida"
+
+  # Deployment + Stage
+  ApiDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn:
+      - IngresoPostMethod
+      - IngresoOptionsMethod
+      - SalidaPostMethod
+      - SalidaOptionsMethod
+    Properties:
+      RestApiId: !Ref InventarioControlAPI
+
+  ApiStage:
+    Type: AWS::ApiGateway::Stage
+    Properties:
+      StageName: prod
+      RestApiId: !Ref InventarioControlAPI
+      DeploymentId: !Ref ApiDeployment
+      MethodSettings:
+        - ResourcePath: "/*"
+          HttpMethod: "*"
+          LoggingLevel: INFO
+          MetricsEnabled: true
+          ThrottlingBurstLimit: 50
+          ThrottlingRateLimit: 20
+
+  # API Key + Usage Plan (capa de seguridad adicional, no descrita en el README
+  # pero recomendada para no exponer el endpoint sin control de acceso)
+  InventarioApiKey:
+    Type: AWS::ApiGateway::ApiKey
+    DependsOn: ApiStage
+    Properties:
+      Name: InventarioControlAPIKey
+      Description: API Key para autenticar el frontend del sistema de inventario.
+      Enabled: true
+      StageKeys:
+        - RestApiId: !Ref InventarioControlAPI
+          StageName: prod
+
+  InventarioUsagePlan:
+    Type: AWS::ApiGateway::UsagePlan
+    DependsOn: ApiStage
+    Properties:
+      UsagePlanName: InventarioControlUsagePlan
+      Description: Plan de uso para mantener el consumo dentro del Free Tier.
+      ApiStages:
+        - ApiId: !Ref InventarioControlAPI
+          Stage: prod
+      Throttle:
+        BurstLimit: 50
+        RateLimit: 20
+      Quota:
+        Limit: 30000
+        Period: MONTH
+
+  InventarioUsagePlanKey:
+    Type: AWS::ApiGateway::UsagePlanKey
+    Properties:
+      KeyId: !Ref InventarioApiKey
+      KeyType: API_KEY
+      UsagePlanId: !Ref InventarioUsagePlan
+
+# -----------------------------------------------------------------------------
+# OUTPUTS
+# -----------------------------------------------------------------------------
+Outputs:
+  FrontendBucketWebsiteURL:
+    Description: URL del sitio web estatico (frontend) alojado en S3.
+    Value: !GetAtt FrontendBucket.WebsiteURL
+
+  FrontendBucketName:
+    Description: Nombre del bucket S3 del frontend.
+    Value: !Ref FrontendBucket
+
+  ApiInvokeURL:
+    Description: URL base de la API REST desplegada (stage prod).
+    Value: !Sub "https://${InventarioControlAPI}.execute-api.${AWS::Region}.amazonaws.com/prod"
+
+  IngresoEndpoint:
+    Description: Endpoint para registrar ingresos (POST).
+    Value: !Sub "https://${InventarioControlAPI}.execute-api.${AWS::Region}.amazonaws.com/prod/ingreso"
+
+  SalidaEndpoint:
+    Description: Endpoint para registrar salidas (POST).
+    Value: !Sub "https://${InventarioControlAPI}.execute-api.${AWS::Region}.amazonaws.com/prod/salida"
+
+  DynamoDBTableName:
+    Description: Nombre de la tabla DynamoDB de inventario.
+    Value: !Ref TablaInventarioPyME
+
+  SNSTopicArn:
+    Description: ARN del topico SNS de alertas de stock bajo.
+    Value: !Ref AlertasStockBajoTopic
+
+  ApiKeyId:
+    Description: ID de la API Key (el valor de la key se consulta en la consola o via CLI/get-api-key con --include-value).
+    Value: !Ref InventarioApiKey
+
+  LambdaExecutionRoleArn:
+    Description: ARN del rol IAM usado por ambas funciones Lambda.
+    Value: !GetAtt LambdaInventoryExecutionRole.Arn
