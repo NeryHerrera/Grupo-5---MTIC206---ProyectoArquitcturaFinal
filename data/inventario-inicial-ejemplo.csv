@@ -1,0 +1,21 @@
+productoId,nombre,categoria,cantidad
+banana,Platano,Refrigerador,24
+tomate,Tomate,Refrigerador,18
+lechuga,Lechuga,Refrigerador,12
+cebolla,Cebolla,Refrigerador,30
+pollo,Pollo entero,Congelador,15
+carne_res,Carne de res,Congelador,10
+camaron,Camaron,Congelador,8
+salmon,Salmon,Congelador,6
+leche,Leche entera,Refrigerador,20
+queso,Queso mozzarella,Refrigerador,14
+huevo,Huevos,Refrigerador,36
+arroz,Arroz blanco,Bodega Seca,25
+aceite,Aceite vegetal,Bodega Seca,10
+pasta,Pasta seca,Bodega Seca,22
+sal,Sal de mesa,Bodega Seca,8
+pan,Pan de caja,Bodega Seca,16
+cafe,Cafe molido,Bodega Seca,5
+detergente,Detergente cocina,Sin Clasificar,6
+papel_higenico,Papel higienico,Sin Clasificar,12
+guantes,Guantes desechables,Sin Clasificar,40

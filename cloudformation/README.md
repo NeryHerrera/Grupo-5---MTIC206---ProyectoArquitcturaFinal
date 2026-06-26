@@ -6,18 +6,18 @@ Este directorio contiene la plantilla de **AWS CloudFormation** (Infrastructure 
 
 El archivo `inventario-sme-stack.yaml` define todos los recursos necesarios para el sistema automatizado de control de inventario:
 
-### Recursos incluidos (24 total):
+### Recursos incluidos:
 
-- **Amazon S3**: Bucket para alojamiento del frontend estático
+- **Amazon S3**: Bucket frontend + bucket staging CSV + bucket assets Glue (scripts/temp)
 - **Amazon DynamoDB**: Tabla `TablaInventarioPyME` con modelo On-Demand + GSI
-- **AWS Lambda**: 2 funciones (Node.js 24.x)
-  - `ProcesarIngresoIAFunction`: Analiza imágenes con Rekognition y actualiza inventario
-  - `GestionarSalidasAlertasFunction`: Gestiona salidas y dispara alertas SNS
+- **AWS Lambda**: 3 funciones (Node.js 24.x) — ingreso IA, salidas/alertas, listar inventario
+- **AWS Glue**: Data Catalog, Crawler, Job Spark ETL (`CargaInventarioGlueJob`)
+- **Amazon EventBridge**: Regla que dispara Glue al subir `.csv` al bucket staging
 - **Amazon Rekognition**: Servicio de visión artificial (DetectLabels)
-- **Amazon API Gateway**: REST API con rutas `/ingreso` y `/salida`
+- **Amazon API Gateway**: REST API con rutas `/ingreso`, `/salida` e `/inventario`
 - **Amazon SNS**: Topic para alertas de stock bajo
-- **AWS IAM**: Rol con privilegios mínimos `LambdaInventoryExecutionRole`
-- **AWS CloudWatch**: Log Groups con retención de 14 días
+- **AWS IAM**: Roles (`LambdaInventoryExecutionRole`, `GlueEtlExecutionRole`, `GlueCrawlerRole`, `EventBridgeGlueStartRole`)
+- **AWS CloudWatch**: Log Groups Lambda + logs Glue (`/aws-glue/jobs/*`)
 - **AWS ApiGateway**: API Key + Usage Plan para seguridad
 
 ## 🔧 Prerequisitos
@@ -30,7 +30,7 @@ Antes de desplegar el stack, asegúrate de tener:
    ```
 
 2. **Permisos suficientes** en tu cuenta AWS para crear:
-   - S3, DynamoDB, Lambda, API Gateway, SNS, IAM, CloudWatch
+   - S3, DynamoDB, Lambda, API Gateway, SNS, IAM, CloudWatch, Glue, EventBridge
    - Típicamente requiere rol `AdministratorAccess` o equivalente
 
 3. **Región AWS**: Se recomienda usar regiones que soporten todos los servicios (ej. `us-east-1`, `eu-west-1`)
@@ -47,7 +47,106 @@ El stack acepta los siguientes parámetros al desplegar:
 
 ## 🚀 Despliegue
 
-### Opción 1: Usar AWS CLI (recomendado)
+### Opción 1: GitHub Actions con OIDC (recomendado)
+
+Despliegue automático al hacer push a `main` (cambios en `cloudformation/inventario-sme-stack.yaml`) o manualmente desde la pestaña **Actions**.
+
+**Workflows:**
+- `.github/workflows/deploy-infrastructure.yml` — crea o actualiza el stack
+- `.github/workflows/validate-infrastructure.yml` — valida la plantilla en pull requests
+
+#### Checklist A — Configurar AWS (una sola vez)
+
+1. Anota tu **Account ID** (consola AWS → clic en tu usuario arriba a la derecha).
+
+2. **IAM → Identity providers → Add provider**
+   - Tipo: OpenID Connect
+   - URL: `https://token.actions.githubusercontent.com`
+   - Audience: `sts.amazonaws.com`
+
+3. **IAM → Roles → Create role**
+   - Trusted entity: **Web identity**
+   - Provider: `token.actions.githubusercontent.com`
+   - Audience: `sts.amazonaws.com`
+   - Edita la trust policy con [`iam/github-oidc-trust-policy.json`](iam/github-oidc-trust-policy.json):
+     - Reemplaza `ACCOUNT_ID` por tu ID de cuenta
+     - Reemplaza `GITHUB_ORG/GITHUB_REPO` por tu repo (ej. `mi-usuario/Grupo-5---MTIC206---ProyectoArquitcturaFinal`)
+   - Nombre sugerido: `GitHubActions-InventarioSme-DeployRole`
+   - Adjunta la política de [`iam/github-actions-deploy-policy.json`](iam/github-actions-deploy-policy.json) como **inline policy**
+   - Si el primer deploy falla por permisos, adjunta temporalmente `AdministratorAccess` para desbloquear el piloto
+   - Copia el **ARN del rol**
+
+4. Fija la región de trabajo (ej. `us-east-1`).
+
+#### Checklist B — Configurar GitHub
+
+En el repo: **Settings → Secrets and variables → Actions**
+
+**Variables:**
+
+| Variable | Ejemplo |
+|----------|---------|
+| `AWS_ROLE_ARN` | `arn:aws:iam::123456789012:role/GitHubActions-InventarioSme-DeployRole` |
+| `AWS_REGION` | `us-east-1` |
+| `PROJECT_NAME` | `inventario-sme` (opcional) |
+| `STOCK_BAJO_UMBRAL` | `5` (opcional) |
+
+**Secrets:**
+
+| Secret | Descripción |
+|--------|-------------|
+| `ALERT_EMAIL` | Correo del gerente para alertas SNS |
+
+Verifica que **Actions** esté habilitado en Settings → Actions → General.
+
+#### Checklist C — Primer despliegue
+
+1. Push a la rama `main` con los workflows incluidos.
+2. GitHub → **Actions** → **Deploy Infrastructure** → **Run workflow** (si no se disparó solo).
+3. Espera `CREATE_COMPLETE` o `UPDATE_COMPLETE` en los logs.
+4. Revisa el **Job summary** con los outputs del stack.
+5. En AWS CloudFormation, confirma el stack `inventario-sme-stack`.
+
+#### Checklist D — Post-deploy manual
+
+| Paso | Acción |
+|------|--------|
+| 1 | Confirmar suscripción SNS en el correo de AWS |
+| 2 | Obtener valor de API Key (ver sección [API Key](#-api-key)) |
+| 3 | Subir `Frontend/prototipo/index.html` al bucket S3 del frontend |
+| 4 | Configurar URL de API + API Key en la interfaz web |
+| 5 | Subir script Glue a `GlueAssetsBucket` (automático con `deploy.sh`) |
+| 6 | Subir CSV al bucket staging → verificar Glue Job `CargaInventarioGlueJob` |
+
+**Subir frontend (PowerShell):**
+
+```powershell
+aws s3 cp Frontend/prototipo/index.html s3://inventario-sme-frontend-bucket-<ACCOUNT_ID>/index.html --region us-east-1
+```
+
+#### Flujo continuo
+
+```
+Cambio en inventario-sme-stack.yaml
+  → PR a main → Validate Infrastructure
+  → Merge → Deploy Infrastructure (automático)
+```
+
+Para cambiar email o umbral: edita Variables/Secrets en GitHub y ejecuta **Deploy Infrastructure** manualmente.
+
+---
+
+### Opción 2: Script deploy.sh (CLI + script Glue)
+
+Desde el directorio `cloudformation/`:
+
+```bash
+bash deploy.sh
+```
+
+El script crea o actualiza el stack y sube automáticamente `glue/scripts/carga_inventario_etl.py` al bucket `GlueAssetsBucket`.
+
+### Opción 3: AWS CLI manual
 
 ```bash
 aws cloudformation create-stack \
@@ -68,7 +167,68 @@ aws cloudformation describe-stacks \
 
 El estado debe cambiar a `CREATE_COMPLETE`.
 
-### Opción 2: AWS CloudFormation Console
+### Actualizar un stack existente
+
+Si el stack ya está desplegado y agregaste recursos ETL u otros cambios al template:
+
+```bash
+aws cloudformation update-stack \
+  --stack-name inventario-sme-stack \
+  --template-body file://inventario-sme-stack.yaml \
+  --parameters ParameterKey=AlertEmail,ParameterValue=gerente@ejemplo.com \
+  --capabilities CAPABILITY_NAMED_IAM \
+  --region us-east-1
+```
+
+Espera hasta que el estado sea `UPDATE_COMPLETE`.
+
+Luego sube el script Glue (requerido antes del primer run):
+
+```bash
+aws s3 cp ../glue/scripts/carga_inventario_etl.py \
+  s3://inventario-sme-glue-assets-ACCOUNT_ID/scripts/carga_inventario_etl.py \
+  --region us-east-1
+```
+
+## ETL: Carga inicial con AWS Glue
+
+Pobla DynamoDB subiendo un CSV al bucket staging. **AWS Glue** (job Spark) ejecuta Extract → Transform → Load hacia `TablaInventarioPyME`.
+
+**Flujo:** CSV en `inventario-sme-staging-csv-{AccountId}` → EventBridge (`InventarioCsvUploadRule`) → Glue Job `CargaInventarioGlueJob` → DynamoDB (overwrite por `productoId`).
+
+**Componentes Glue en el stack:**
+
+| Recurso | Función |
+|---------|---------|
+| `inventario_sme_staging` | Base de datos Data Catalog |
+| `inventario_csv` | Tabla externa CSV |
+| `InventarioCsvCrawler` | Descubre/actualiza esquema (ejecución manual opcional) |
+| `CargaInventarioGlueJob` | Job Spark ETL (PySpark + boto3) |
+
+**Script en repo:** [`glue/scripts/carga_inventario_etl.py`](../glue/scripts/carga_inventario_etl.py)
+
+**Archivo de ejemplo en el repositorio:** [`data/inventario-inicial-ejemplo.csv`](../data/inventario-inicial-ejemplo.csv)
+
+**Formato CSV:**
+
+```csv
+productoId,nombre,categoria,cantidad
+banana,Platano,Refrigerador,24
+```
+
+Categorías válidas: `Refrigerador`, `Congelador`, `Bodega Seca`, `Sin Clasificar`.
+
+**Guía paso a paso en consola AWS:** [`docs-aux/guia-carga-csv-staging.md`](../docs-aux/guia-carga-csv-staging.md)
+
+**Carga vía CLI (alternativa):**
+
+```bash
+aws s3 cp ../data/inventario-inicial-ejemplo.csv s3://inventario-sme-staging-csv-ACCOUNT_ID/inventario-inicial-ejemplo.csv --region us-east-1
+```
+
+Reemplaza `ACCOUNT_ID` por tu ID de cuenta AWS (visible en el output `StagingCsvBucketName`).
+
+### Opción 4: AWS CloudFormation Console
 
 1. Abre la [AWS CloudFormation Console](https://console.aws.amazon.com/cloudformation)
 2. Clic en **Create Stack** → **With new resources**
@@ -89,10 +249,17 @@ FrontendBucketWebsiteURL: https://inventario-sme-frontend-bucket-XXXX.s3-website
 ApiInvokeURL:             https://XXXXXXXXXX.execute-api.us-east-1.amazonaws.com/prod
 IngresoEndpoint:          https://XXXXXXXXXX.execute-api.us-east-1.amazonaws.com/prod/ingreso
 SalidaEndpoint:           https://XXXXXXXXXX.execute-api.us-east-1.amazonaws.com/prod/salida
+InventarioEndpoint:       https://XXXXXXXXXX.execute-api.us-east-1.amazonaws.com/prod/inventario
+StagingCsvBucketName:     inventario-sme-staging-csv-XXXXXXXXXXXX
+GlueAssetsBucketName:     inventario-sme-glue-assets-XXXXXXXXXXXX
+CargaInventarioGlueJobName: CargaInventarioGlueJob
+InventarioStagingDatabaseName: inventario_sme_staging
+InventarioCsvCrawlerName: InventarioCsvCrawler
 DynamoDBTableName:        TablaInventarioPyME
 SNSTopicArn:              arn:aws:sns:us-east-1:XXXX:Alertas_StockBajo_Topic
 ApiKeyId:                 (valor mostrado en outputs)
 LambdaExecutionRoleArn:   arn:aws:iam::XXXX:role/LambdaInventoryExecutionRole
+GlueEtlExecutionRoleArn:  arn:aws:iam::XXXX:role/GlueEtlExecutionRole
 ```
 
 **Para obtener los outputs via CLI:**
@@ -138,9 +305,10 @@ El stack está diseñado para permanecer dentro de los límites del **AWS Free T
 | API Gateway | 1M calls | ~15K calls/mes | ✅ Cubierto |
 | Rekognition | 5K images (12 meses) | ~3K images/mes | ✅ Cubierto |
 | SNS | 1K emails/mes | ~200 emails/mes | ✅ Cubierto |
-| CloudWatch | 5 GB logs/mes | ~500 MB/mes | ✅ Cubierto |
+| CloudWatch | 5 GB logs/mes | ~500 MB/mes | Cubierto |
+| AWS Glue | 1 DPU-hora/mes (12 meses) | ~0.03 DPU-h por carga CSV | Cubierto en piloto |
 
-**⚠️ Nota importante:** Tras 12 meses de Free Tier, Rekognition pasará a tarifa de pago ($1 por 1,000 imágenes).
+**Nota Glue:** cada ejecución del job Spark (2 workers G.1X, ~1–2 min) consume fracciones de DPU-hora; costo marginal bajo en POC.
 
 ## 🗑️ Eliminar el Stack
 
@@ -163,9 +331,17 @@ El estado debe cambiar a `DELETE_COMPLETE` o mostrar error de stack no encontrad
 
 ## 🐛 Troubleshooting
 
+### Error en GitHub Actions: "Not authorized to perform sts:AssumeRoleWithWebIdentity"
+- Verifica que el OIDC provider exista en IAM.
+- Revisa la trust policy: el `sub` debe ser exactamente `repo:ORG/REPO:ref:refs/heads/main`.
+- Confirma que `AWS_ROLE_ARN` en GitHub Variables sea el ARN correcto.
+
+### Error en GitHub Actions: "ALERT_EMAIL no esta configurado"
+- Crea el secret `ALERT_EMAIL` en Settings → Secrets and variables → Actions.
+
 ### Error: "AccessDenied" al crear el stack
 - Verifica que tu usuario AWS tenga permisos para los servicios mencionados.
-- Mínimo requiere: `s3:*`, `dynamodb:*`, `lambda:*`, `apigateway:*`, `sns:*`, `iam:*`, `logs:*`, `rekognition:*`
+- Mínimo requiere: `s3:*`, `dynamodb:*`, `lambda:*`, `apigateway:*`, `sns:*`, `iam:*`, `logs:*`, `rekognition:*`, `glue:*`, `events:*`
 
 ### Error: "The provided role does not have permissions to..."
 - Asegúrate de incluir `--capabilities CAPABILITY_NAMED_IAM` en el comando create-stack.
@@ -178,9 +354,17 @@ El estado debe cambiar a `DELETE_COMPLETE` o mostrar error de stack no encontrad
 - Confirma tu suscripción al topic en el email de confirmación de AWS.
 - Verifica que el parámetro `AlertEmail` sea correcto.
 
+### El ETL Glue no procesa el CSV
+- Verifica que el archivo termine en `.csv` y esté en `StagingCsvBucketName`.
+- Confirma que el script exista en `s3://GlueAssetsBucketName/scripts/carga_inventario_etl.py`.
+- Revisa **AWS Glue → ETL jobs → CargaInventarioGlueJob → Runs** (estado y logs).
+- CloudWatch: `/aws-glue/jobs/output` y `/aws-glue/jobs/error`.
+- Verifica la regla EventBridge `InventarioCsvUploadRule` en estado **Enabled**.
+
 ## 📚 Referencias
 
 - [AWS CloudFormation User Guide](https://docs.aws.amazon.com/cloudformation/)
+- [AWS Glue Developer Guide](https://docs.aws.amazon.com/glue/)
 - [AWS Lambda Developer Guide](https://docs.aws.amazon.com/lambda/)
 - [Amazon Rekognition Detection Labels](https://docs.aws.amazon.com/rekognition/latest/dg/labels.html)
 - [Amazon DynamoDB On-Demand Billing](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/HowItWorks.ReadWriteCapacityMode.html)
@@ -190,4 +374,4 @@ El estado debe cambiar a `DELETE_COMPLETE` o mostrar error de stack no encontrad
 
 **Autor**: Grupo 5 - MTIC206  
 **Fecha**: 2026  
-**Versión del Template**: 1.0
+**Versión del Template**: 1.2

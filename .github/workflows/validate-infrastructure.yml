@@ -1,0 +1,36 @@
+name: Validate Infrastructure
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'cloudformation/**'
+      - '.github/workflows/validate-infrastructure.yml'
+      - '.github/workflows/deploy-infrastructure.yml'
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  TEMPLATE_FILE: cloudformation/inventario-sme-stack.yaml
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Validate CloudFormation template
+        run: |
+          aws cloudformation validate-template \
+            --template-body "file://${TEMPLATE_FILE}"
+          echo "Plantilla valida."

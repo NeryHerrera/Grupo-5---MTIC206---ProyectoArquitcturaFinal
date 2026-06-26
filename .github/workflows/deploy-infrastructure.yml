@@ -1,0 +1,133 @@
+name: Deploy Infrastructure
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'cloudformation/inventario-sme-stack.yaml'
+      - 'glue/scripts/**'
+      - '.github/workflows/deploy-infrastructure.yml'
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  STACK_NAME: inventario-sme-stack
+  TEMPLATE_FILE: cloudformation/inventario-sme-stack.yaml
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Validate CloudFormation template
+        run: |
+          aws cloudformation validate-template \
+            --template-body "file://${TEMPLATE_FILE}"
+
+      - name: Deploy CloudFormation stack
+        env:
+          ALERT_EMAIL: ${{ secrets.ALERT_EMAIL }}
+          PROJECT_NAME: ${{ vars.PROJECT_NAME }}
+          STOCK_BAJO_UMBRAL: ${{ vars.STOCK_BAJO_UMBRAL }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${ALERT_EMAIL}" ]; then
+            echo "Error: el secret ALERT_EMAIL no esta configurado en GitHub."
+            exit 1
+          fi
+
+          PROJECT="${PROJECT_NAME:-inventario-sme}"
+          UMBRAL="${STOCK_BAJO_UMBRAL:-5}"
+
+          PARAMS=(
+            "ParameterKey=AlertEmail,ParameterValue=${ALERT_EMAIL}"
+            "ParameterKey=ProjectName,ParameterValue=${PROJECT}"
+            "ParameterKey=StockBajoUmbral,ParameterValue=${UMBRAL}"
+          )
+
+          stack_exists() {
+            aws cloudformation describe-stacks \
+              --stack-name "${STACK_NAME}" \
+              --query 'Stacks[0].StackStatus' \
+              --output text 2>/dev/null || echo "NOT_FOUND"
+          }
+
+          STATUS="$(stack_exists)"
+
+          if [ "${STATUS}" = "NOT_FOUND" ] || [ "${STATUS}" = "None" ]; then
+            echo "Stack no existe. Creando ${STACK_NAME}..."
+            aws cloudformation create-stack \
+              --stack-name "${STACK_NAME}" \
+              --template-body "file://${TEMPLATE_FILE}" \
+              --parameters "${PARAMS[@]}" \
+              --capabilities CAPABILITY_NAMED_IAM
+            aws cloudformation wait stack-create-complete --stack-name "${STACK_NAME}"
+            echo "Stack creado correctamente."
+          else
+            echo "Stack existente (estado: ${STATUS}). Actualizando..."
+            set +e
+            UPDATE_OUTPUT="$(aws cloudformation update-stack \
+              --stack-name "${STACK_NAME}" \
+              --template-body "file://${TEMPLATE_FILE}" \
+              --parameters "${PARAMS[@]}" \
+              --capabilities CAPABILITY_NAMED_IAM 2>&1)"
+            UPDATE_EXIT=$?
+            set -e
+
+            if [ ${UPDATE_EXIT} -ne 0 ]; then
+              if echo "${UPDATE_OUTPUT}" | grep -q "No updates are to be performed"; then
+                echo "Sin cambios en la plantilla o parametros. Nada que actualizar."
+              else
+                echo "${UPDATE_OUTPUT}"
+                exit ${UPDATE_EXIT}
+              fi
+            else
+              aws cloudformation wait stack-update-complete --stack-name "${STACK_NAME}"
+              echo "Stack actualizado correctamente."
+            fi
+          fi
+
+      - name: Subir script Glue ETL a S3
+        run: |
+          GLUE_BUCKET="$(aws cloudformation describe-stacks \
+            --stack-name "${STACK_NAME}" \
+            --query "Stacks[0].Outputs[?OutputKey=='GlueAssetsBucketName'].OutputValue" \
+            --output text)"
+
+          if [ -z "${GLUE_BUCKET}" ] || [ "${GLUE_BUCKET}" = "None" ]; then
+            echo "Error: no se encontro output GlueAssetsBucketName"
+            exit 1
+          fi
+
+          aws s3 cp glue/scripts/carga_inventario_etl.py \
+            "s3://${GLUE_BUCKET}/scripts/carga_inventario_etl.py"
+
+          echo "Script Glue publicado en s3://${GLUE_BUCKET}/scripts/carga_inventario_etl.py"
+
+      - name: Publicar outputs del stack
+        run: |
+          echo "## Outputs del stack ${STACK_NAME}" >> "${GITHUB_STEP_SUMMARY}"
+          echo "" >> "${GITHUB_STEP_SUMMARY}"
+          aws cloudformation describe-stacks \
+            --stack-name "${STACK_NAME}" \
+            --query 'Stacks[0].Outputs[*].[OutputKey,OutputValue]' \
+            --output table >> "${GITHUB_STEP_SUMMARY}"
+
+          echo ""
+          aws cloudformation describe-stacks \
+            --stack-name "${STACK_NAME}" \
+            --query 'Stacks[0].Outputs[*].[OutputKey,OutputValue]' \
+            --output table

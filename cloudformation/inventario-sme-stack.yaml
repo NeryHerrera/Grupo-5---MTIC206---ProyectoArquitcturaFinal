@@ -1,7 +1,7 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: >
   Grupo 5 - MTIC206 - Sistema Automatizado de Control de Inventario con Vision Artificial.
-  Arquitectura Serverless (S3, API Gateway, Lambda, Rekognition, DynamoDB, SNS, IAM, CloudWatch)
+  Arquitectura Serverless (S3, API Gateway, Lambda, Rekognition, DynamoDB, SNS, IAM, CloudWatch, AWS Glue ETL)
   disenada para operar dentro de los limites del AWS Free Tier.
 
 # -----------------------------------------------------------------------------
@@ -93,6 +93,251 @@ Resources:
       Tags:
         - Key: Proyecto
           Value: !Ref ProjectName
+
+  # ---------------------------------------------------------------------------
+  # ETL CARGA INICIAL: S3 Staging + AWS Glue (Spark) + EventBridge
+  # ---------------------------------------------------------------------------
+  StagingCsvBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "inventario-sme-staging-csv-${AWS::AccountId}"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      NotificationConfiguration:
+        EventBridgeConfiguration:
+          EventBridgeEnabled: true
+      Tags:
+        - Key: Proyecto
+          Value: !Ref ProjectName
+
+  GlueAssetsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "inventario-sme-glue-assets-${AWS::AccountId}"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags:
+        - Key: Proyecto
+          Value: !Ref ProjectName
+
+  InventarioStagingDatabase:
+    Type: AWS::Glue::Database
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseInput:
+        Name: inventario_sme_staging
+        Description: Catalogo Glue para CSV de inventario inicial en bucket staging
+
+  InventarioCsvTable:
+    Type: AWS::Glue::Table
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseName: !Ref InventarioStagingDatabase
+      TableInput:
+        Name: inventario_csv
+        Description: Tabla externa CSV de inventario PyME
+        TableType: EXTERNAL_TABLE
+        Parameters:
+          skip.header.line.count: "1"
+          classification: csv
+        StorageDescriptor:
+          Columns:
+            - Name: productoId
+              Type: string
+            - Name: nombre
+              Type: string
+            - Name: categoria
+              Type: string
+            - Name: cantidad
+              Type: int
+          Location: !Sub "s3://${StagingCsvBucket}/"
+          InputFormat: org.apache.hadoop.mapred.TextInputFormat
+          OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
+          SerdeInfo:
+            SerializationLibrary: org.apache.hadoop.hive.serde2.OpenCSVSerde
+            Parameters:
+              separatorChar: ","
+
+  GlueCrawlerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: GlueCrawlerRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: glue.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole
+      Policies:
+        - PolicyName: GlueCrawlerStagingPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:ListBucket
+                Resource:
+                  - !GetAtt StagingCsvBucket.Arn
+                  - !Sub "${StagingCsvBucket.Arn}/*"
+      Tags:
+        - Key: Proyecto
+          Value: !Ref ProjectName
+
+  InventarioCsvCrawler:
+    Type: AWS::Glue::Crawler
+    Properties:
+      Name: InventarioCsvCrawler
+      Role: !GetAtt GlueCrawlerRole.Arn
+      DatabaseName: !Ref InventarioStagingDatabase
+      Description: Descubre esquema de CSV de inventario en bucket staging
+      Targets:
+        S3Targets:
+          - Path: !Sub "s3://${StagingCsvBucket}/"
+      SchemaChangePolicy:
+        UpdateBehavior: UPDATE_IN_DATABASE
+        DeleteBehavior: LOG
+
+  GlueEtlExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: GlueEtlExecutionRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: glue.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole
+      Policies:
+        - PolicyName: GlueEtlCustomPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:ListBucket
+                Resource:
+                  - !GetAtt StagingCsvBucket.Arn
+                  - !Sub "${StagingCsvBucket.Arn}/*"
+                  - !GetAtt GlueAssetsBucket.Arn
+                  - !Sub "${GlueAssetsBucket.Arn}/*"
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                Resource: !Sub "${GlueAssetsBucket.Arn}/temp/*"
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:BatchWriteItem
+                Resource:
+                  - !GetAtt TablaInventarioPyME.Arn
+                  - !Sub "${TablaInventarioPyME.Arn}/index/*"
+              - Effect: Allow
+                Action:
+                  - glue:GetDatabase
+                  - glue:GetTable
+                  - glue:GetTables
+                Resource:
+                  - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:catalog"
+                  - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:database/${InventarioStagingDatabase}"
+                  - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:table/${InventarioStagingDatabase}/*"
+      Tags:
+        - Key: Proyecto
+          Value: !Ref ProjectName
+
+  CargaInventarioGlueJob:
+    Type: AWS::Glue::Job
+    Properties:
+      Name: CargaInventarioGlueJob
+      Role: !GetAtt GlueEtlExecutionRole.Arn
+      GlueVersion: "4.0"
+      WorkerType: G.1X
+      NumberOfWorkers: 2
+      Timeout: 10
+      Command:
+        Name: glueetl
+        ScriptLocation: !Sub "s3://${GlueAssetsBucket}/scripts/carga_inventario_etl.py"
+        PythonVersion: "3"
+      DefaultArguments:
+        --job-language: python
+        --enable-metrics: "true"
+        --enable-glue-datacatalog: "true"
+        --TABLE_NAME: !Ref TablaInventarioPyME
+        --TempDir: !Sub "s3://${GlueAssetsBucket}/temp/"
+        --INPUT_BUCKET: !Ref StagingCsvBucket
+        --INPUT_KEY: placeholder.csv
+      Description: ETL Spark - carga CSV de inventario inicial hacia DynamoDB
+
+  EventBridgeGlueRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: EventBridgeGlueStartRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: StartGlueJobPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: glue:StartJobRun
+                Resource: !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:job/CargaInventarioGlueJob"
+      Tags:
+        - Key: Proyecto
+          Value: !Ref ProjectName
+
+  InventarioCsvUploadRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: InventarioCsvUploadRule
+      Description: Dispara Glue ETL al subir un CSV al bucket staging
+      EventPattern:
+        source:
+          - aws.s3
+        detail-type:
+          - Object Created
+        detail:
+          bucket:
+            name:
+              - !Ref StagingCsvBucket
+          object:
+            key:
+              - wildcard: "*.csv"
+      State: ENABLED
+      Targets:
+        - Id: StartCargaInventarioGlueJob
+          Arn: !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:job/CargaInventarioGlueJob"
+          RoleArn: !GetAtt EventBridgeGlueRole.Arn
+          InputTransformer:
+            InputPathsMap:
+              bucket: $.detail.bucket.name
+              key: $.detail.object.key
+            InputTemplate: |
+              {
+                "JobName": "CargaInventarioGlueJob",
+                "Arguments": {
+                  "--INPUT_BUCKET": "<bucket>",
+                  "--INPUT_KEY": "<key>"
+                }
+              }
 
   # ---------------------------------------------------------------------------
   # NOTIFICACIONES: SNS (Alertas_StockBajo_Topic)
@@ -763,3 +1008,31 @@ Outputs:
   LambdaExecutionRoleArn:
     Description: ARN del rol IAM usado por las funciones Lambda del inventario.
     Value: !GetAtt LambdaInventoryExecutionRole.Arn
+
+  StagingCsvBucketName:
+    Description: Nombre del bucket S3 de staging para carga inicial CSV (ETL).
+    Value: !Ref StagingCsvBucket
+
+  StagingCsvBucketArn:
+    Description: ARN del bucket S3 de staging para carga inicial CSV.
+    Value: !GetAtt StagingCsvBucket.Arn
+
+  CargaInventarioGlueJobName:
+    Description: Nombre del Glue Job ETL que procesa CSV y carga DynamoDB.
+    Value: !Ref CargaInventarioGlueJob
+
+  GlueAssetsBucketName:
+    Description: Bucket S3 para scripts Glue y directorio temporal del job.
+    Value: !Ref GlueAssetsBucket
+
+  InventarioStagingDatabaseName:
+    Description: Base de datos Glue Data Catalog para CSV de staging.
+    Value: !Ref InventarioStagingDatabase
+
+  InventarioCsvCrawlerName:
+    Description: Crawler Glue para descubrir esquema del CSV en staging.
+    Value: !Ref InventarioCsvCrawler
+
+  GlueEtlExecutionRoleArn:
+    Description: ARN del rol IAM usado por el Glue Job ETL.
+    Value: !GetAtt GlueEtlExecutionRole.Arn
