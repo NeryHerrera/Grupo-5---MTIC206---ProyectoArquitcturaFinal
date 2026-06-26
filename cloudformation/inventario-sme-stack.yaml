@@ -258,8 +258,135 @@ Resources:
         - Key: Proyecto
           Value: !Ref ProjectName
 
+  LambdaGlueScriptSeedRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: LambdaGlueScriptSeedRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: SeedGlueScriptPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: "arn:aws:logs:*:*:*"
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                Resource: !Sub "${GlueAssetsBucket.Arn}/scripts/*"
+      Tags:
+        - Key: Proyecto
+          Value: !Ref ProjectName
+
+  GlueScriptSeedFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: GlueScriptSeedFunction
+      Runtime: nodejs24.x
+      Handler: index.handler
+      Role: !GetAtt LambdaGlueScriptSeedRole.Arn
+      Timeout: 60
+      MemorySize: 128
+      Code:
+        ZipFile: |
+          const https = require("https");
+          const { S3Client, PutObjectCommand } = require("@aws-sdk/client-s3");
+          const s3 = new S3Client({});
+
+          const PLACEHOLDER =
+            "# Placeholder Glue ETL - GitHub Actions sobrescribe con glue/scripts/carga_inventario_etl.py\n";
+
+          function sendResponse(event, context, status, data, physicalResourceId) {
+            const body = JSON.stringify({
+              Status: status,
+              Reason: `See CloudWatch Log Stream: ${context.logStreamName}`,
+              PhysicalResourceId: physicalResourceId || context.logStreamName,
+              StackId: event.StackId,
+              RequestId: event.RequestId,
+              LogicalResourceId: event.LogicalResourceId,
+              NoEcho: false,
+              Data: data || {},
+            });
+            const parsed = new URL(event.ResponseURL);
+            const options = {
+              hostname: parsed.hostname,
+              port: 443,
+              path: `${parsed.pathname}${parsed.search}`,
+              method: "PUT",
+              headers: {
+                "Content-Type": "",
+                "Content-Length": Buffer.byteLength(body),
+              },
+            };
+            return new Promise((resolve, reject) => {
+              const req = https.request(options, (res) => {
+                res.on("data", () => {});
+                res.on("end", resolve);
+              });
+              req.on("error", reject);
+              req.write(body);
+              req.end();
+            });
+          }
+
+          exports.handler = async (event, context) => {
+            const bucket = event.ResourceProperties.Bucket;
+            const key = event.ResourceProperties.ScriptKey;
+            const physicalId = `glue-script-${bucket}/${key}`;
+
+            try {
+              if (event.RequestType === "Delete") {
+                await sendResponse(event, context, "SUCCESS", {}, physicalId);
+                return;
+              }
+
+              await s3.send(
+                new PutObjectCommand({
+                  Bucket: bucket,
+                  Key: key,
+                  Body: PLACEHOLDER,
+                  ContentType: "text/x-python",
+                })
+              );
+
+              await sendResponse(event, context, "SUCCESS", { seeded: true }, physicalId);
+            } catch (err) {
+              console.error(err);
+              await sendResponse(event, context, "FAILED", {}, physicalId);
+              throw err;
+            }
+          };
+
+  GlueScriptSeedFunctionPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref GlueScriptSeedFunction
+      Action: lambda:InvokeFunction
+      Principal: cloudformation.amazonaws.com
+
+  GlueScriptSeed:
+    Type: AWS::CloudFormation::CustomResource
+    DependsOn:
+      - GlueAssetsBucket
+      - GlueScriptSeedFunctionPermission
+    Properties:
+      ServiceToken: !GetAtt GlueScriptSeedFunction.Arn
+      Bucket: !Ref GlueAssetsBucket
+      ScriptKey: scripts/carga_inventario_etl.py
+
   CargaInventarioGlueJob:
     Type: AWS::Glue::Job
+    DependsOn: GlueScriptSeed
     Properties:
       Name: CargaInventarioGlueJob
       Role: !GetAtt GlueEtlExecutionRole.Arn
@@ -281,22 +408,35 @@ Resources:
         --INPUT_KEY: placeholder.csv
       Description: ETL Spark - carga CSV de inventario inicial hacia DynamoDB
 
-  EventBridgeGlueRole:
+  # EventBridge no acepta el ARN de un Glue Job como target; Lambda inicia el job.
+  DispararGlueEtlLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: "/aws/lambda/DispararGlueEtlFunction"
+      RetentionInDays: 14
+
+  LambdaGlueStarterRole:
     Type: AWS::IAM::Role
     Properties:
-      RoleName: EventBridgeGlueStartRole
+      RoleName: LambdaGlueStarterRole
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
           - Effect: Allow
             Principal:
-              Service: events.amazonaws.com
+              Service: lambda.amazonaws.com
             Action: sts:AssumeRole
       Policies:
-        - PolicyName: StartGlueJobPolicy
+        - PolicyName: StartGlueJobAndLogs
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: "arn:aws:logs:*:*:*"
               - Effect: Allow
                 Action: glue:StartJobRun
                 Resource: !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:job/CargaInventarioGlueJob"
@@ -304,11 +444,55 @@ Resources:
         - Key: Proyecto
           Value: !Ref ProjectName
 
+  DispararGlueEtlFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: DispararGlueEtlLogGroup
+    Properties:
+      FunctionName: DispararGlueEtlFunction
+      Runtime: nodejs24.x
+      Handler: index.handler
+      Role: !GetAtt LambdaGlueStarterRole.Arn
+      Timeout: 30
+      MemorySize: 128
+      Environment:
+        Variables:
+          GLUE_JOB_NAME: CargaInventarioGlueJob
+      Code:
+        ZipFile: |
+          const { GlueClient, StartJobRunCommand } = require("@aws-sdk/client-glue");
+          const glue = new GlueClient({});
+
+          exports.handler = async (event) => {
+            const detail = event.detail || {};
+            const bucket = detail.bucket?.name;
+            const key = detail.object?.key;
+
+            if (!bucket || !key || !String(key).toLowerCase().endsWith(".csv")) {
+              console.log("Evento ignorado (no es CSV en staging)", { bucket, key });
+              return { skipped: true };
+            }
+
+            const jobName = process.env.GLUE_JOB_NAME;
+            const result = await glue.send(
+              new StartJobRunCommand({
+                JobName: jobName,
+                Arguments: {
+                  "--INPUT_BUCKET": bucket,
+                  "--INPUT_KEY": key,
+                },
+              })
+            );
+
+            console.log("Glue job iniciado", { jobRunId: result.JobRunId, bucket, key });
+            return { started: true, jobRunId: result.JobRunId, bucket, key };
+          };
+
   InventarioCsvUploadRule:
     Type: AWS::Events::Rule
+    DependsOn: DispararGlueEtlFunction
     Properties:
       Name: InventarioCsvUploadRule
-      Description: Dispara Glue ETL al subir un CSV al bucket staging
+      Description: Dispara Glue ETL al subir un CSV al bucket staging (via Lambda)
       EventPattern:
         source:
           - aws.s3
@@ -320,24 +504,19 @@ Resources:
               - !Ref StagingCsvBucket
           object:
             key:
-              - wildcard: "*.csv"
+              - suffix: ".csv"
       State: ENABLED
       Targets:
-        - Id: StartCargaInventarioGlueJob
-          Arn: !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:job/CargaInventarioGlueJob"
-          RoleArn: !GetAtt EventBridgeGlueRole.Arn
-          InputTransformer:
-            InputPathsMap:
-              bucket: $.detail.bucket.name
-              key: $.detail.object.key
-            InputTemplate: |
-              {
-                "JobName": "CargaInventarioGlueJob",
-                "Arguments": {
-                  "--INPUT_BUCKET": "<bucket>",
-                  "--INPUT_KEY": "<key>"
-                }
-              }
+        - Id: InvokeDispararGlueEtl
+          Arn: !GetAtt DispararGlueEtlFunction.Arn
+
+  DispararGlueEtlEventPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref DispararGlueEtlFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt InventarioCsvUploadRule.Arn
 
   # ---------------------------------------------------------------------------
   # NOTIFICACIONES: SNS (Alertas_StockBajo_Topic)
