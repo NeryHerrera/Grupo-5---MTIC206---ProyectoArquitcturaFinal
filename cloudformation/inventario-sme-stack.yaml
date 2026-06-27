@@ -1205,7 +1205,7 @@ Outputs:
     Value: !Ref GlueAssetsBucket
 
   InventarioStagingDatabaseName:
-    Description: Base de datos Glue Data Catalog para CSV de staging.
+    Description: Base de datos Glue-Data Catalog para CSV de staging.
     Value: !Ref InventarioStagingDatabase
 
   InventarioCsvCrawlerName:
